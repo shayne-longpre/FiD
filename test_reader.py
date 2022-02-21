@@ -4,9 +4,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys, os
 import torch
 import transformers
 import numpy as np
+import pandas as pd
 from pathlib import Path
 import torch.distributed as dist
 from torch.utils.data import DataLoader, SequentialSampler
@@ -19,6 +21,11 @@ import src.data
 import src.evaluation
 import src.model
 
+def softmax(x):
+    exp_x = np.exp(x - np.max(x))
+    f_x = exp_x / np.sum(exp_x)
+    return f_x
+
 def evaluate(model, dataset, dataloader, tokenizer, opt):
     loss, curr_loss = 0.0, 0.0
     model.eval()
@@ -29,6 +36,7 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
         model.reset_score_storage() 
     total = 0
     exactmatch = []
+    answers, seq_scores = [], []
     if opt.write_results:
         write_path = Path(opt.checkpoint_dir) / opt.name / 'test_results'
         fw = open(write_path / ('%d.txt'%opt.global_rank), 'a')
@@ -39,21 +47,31 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
             if opt.write_crossattention_scores:
                 model.reset_score_storage()
 
+            # TODO: Swap these lines for commented out `.cuda()` lines.
             outputs = model.generate(
+                # input_ids=context_ids,
+                # attention_mask=context_mask,
                 input_ids=context_ids.cuda(),
                 attention_mask=context_mask.cuda(),
                 max_length=50,
             )
+            gen_sequence = outputs["sequences"]
+            seq_score = outputs["scores"]
 
             if opt.write_crossattention_scores:
-                crossattention_scores = model.get_crossattention_scores(context_mask.cuda())
+                # TODO: Swap these lines for commented out `.cuda()` lines.
+                crossattention_scores = model.get_crossattention_scores(context_mask)
+                # crossattention_scores = model.get_crossattention_scores(context_mask.cuda())
 
-            for k, o in enumerate(outputs):
+            for k, o in enumerate(gen_sequence):
                 ans = tokenizer.decode(o, skip_special_tokens=True)
                 example = dataset.data[idx[k]]
                 if 'answers' in example:
                     score = src.evaluation.ems(ans, example['answers'])
                     exactmatch.append(score)
+
+                answers.append(ans)
+                seq_scores.append(seq_score)
 
                 if opt.write_results:
                     fw.write(str(example['id']) + "\t" + ans + '\n')
@@ -75,7 +93,42 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
         torch.distributed.barrier()
     score, total = src.util.weighted_average(np.mean(exactmatch), total, opt)
     
-    return score, total
+    return {
+        "answers": answers,
+        "seq_scores": seq_scores,
+        "score": score, 
+        "total": total,
+        "exact_matches": exactmatch,
+    }
+
+def write_outputs_json(
+    eval_dataset, 
+    answers, 
+    seq_scores, 
+    # crossattention_scores,
+    exact_matches, 
+    outpath,
+):
+    """
+    NB: Note that `exact_matches` uses dummy answers and is always 1, if dataset does not come
+    with `targets`.
+    """
+    assert len(eval_dataset) == len(answers) == len(seq_scores)
+    outputs = []
+    for i, eval_datum in enumerate(eval_dataset):
+        outputs.append({
+            "index": eval_datum["index"],
+            "question": eval_datum["question"].replace("question: ", ""),
+            # "target": eval_datum["target"],
+            "predicted_answer": {
+                # "em": int(exact_matches[i]),
+                "text": answers[i],
+                "seq_scores": [np.max(softmax(ssv.numpy()[0])) for ssv in seq_scores[i]],
+            },
+        })
+    # write to JSONL
+    os.makedirs(os.path.dirname(outpath), exist_ok=True)
+    pd.DataFrame(outputs).to_json(outpath, orient="records", lines=True, compression="infer")
 
 
 if __name__ == "__main__":
@@ -98,15 +151,17 @@ if __name__ == "__main__":
     if not directory_exists and opt.is_main:
         options.print_options(opt)
 
-
     tokenizer = transformers.T5Tokenizer.from_pretrained('t5-base', return_dict=False)
 
     collator_function = src.data.Collator(opt.text_maxlength, tokenizer)
     eval_examples = src.data.load_data(
         opt.eval_data, 
-        global_rank=opt.global_rank, #use the global rank and world size attibutes to split the eval set on multiple gpus
-        world_size=opt.world_size
+        # global_rank=opt.global_rank, #use the global rank and world size attibutes to split the eval set on multiple gpus
+        # world_size=opt.world_size
     )
+    # NB: Added this code to deal with stupid target logic.
+    if "target" not in eval_examples[0]:
+        eval_examples = [{**ex, **{"target": "target"}} for ex in eval_examples]
     eval_dataset = src.data.Dataset(
         eval_examples, 
         opt.n_context, 
@@ -126,9 +181,21 @@ if __name__ == "__main__":
     model = model.to(opt.device)
 
     logger.info("Start eval")
-    exactmatch, total = evaluate(model, eval_dataset, eval_dataloader, tokenizer, opt)
+    eval_outputs = evaluate(model, eval_dataset, eval_dataloader, tokenizer, opt)
+    answers, seq_scores, exactmatch, total, ems = \
+        eval_outputs["answers"], eval_outputs["seq_scores"], eval_outputs["score"], \
+        eval_outputs["total"], eval_outputs["exact_matches"],
 
     logger.info(f'EM {100*exactmatch:.2f}, Total number of example {total}')
+
+    # Save our scores out here:
+    write_outputs_json(
+        eval_dataset, 
+        answers, 
+        seq_scores, 
+        ems, 
+        os.path.join(opt.checkpoint_dir, opt.name, "saved_scores.jsonl"),
+    )
 
     if opt.write_results and opt.is_main:
         glob_path = Path(opt.checkpoint_dir) / opt.name / 'test_results'

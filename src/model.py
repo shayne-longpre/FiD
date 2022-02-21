@@ -12,6 +12,9 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 import numpy as np
 
+# from transformers.file_utils import ModelOutput
+from transformers.modeling_outputs import BaseModelOutput
+
 class FiDT5(transformers.T5ForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
@@ -48,11 +51,16 @@ class FiDT5(transformers.T5ForConditionalGeneration):
     # We need to resize the inputs here, as the generate method expect 2D tensors
     def generate(self, input_ids, attention_mask, max_length):
         self.encoder.n_passages = input_ids.size(1)
-        return super().generate(
+        # import pdb; pdb.set_trace()
+        outputs = super().generate(
             input_ids=input_ids.view(input_ids.size(0), -1),
             attention_mask=attention_mask.view(attention_mask.size(0), -1),
-            max_length=max_length
+            max_length=max_length,
+            return_dict_in_generate=True, 
+            output_scores=True
         )
+        # import pdb; pdb.set_trace()
+        return outputs
 
     def wrap_encoder(self, use_checkpoint=False):
         """
@@ -144,7 +152,12 @@ class EncoderWrapper(torch.nn.Module):
         attention_mask = attention_mask.view(bsz*self.n_passages, passage_length)
         outputs = self.encoder(input_ids, attention_mask, **kwargs)
         outputs = (outputs[0].view(bsz, self.n_passages*passage_length, -1), ) + outputs[1:]
-        return outputs
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=outputs[0],
+            hidden_states=None,
+            attentions=None,
+        )
+        return encoder_outputs
 
 class CheckpointWrapper(torch.nn.Module):
     """
@@ -197,6 +210,8 @@ def cross_attention_forward(
         mask=None,
         kv=None,
         position_bias=None,
+        key_value_states=None,  # added for 4.2.0
+        past_key_value=None,  # added for 4.2.0
         past_key_value_state=None,
         head_mask=None,
         query_length=None,

@@ -41,9 +41,14 @@ class Dataset(torch.utils.data.Dataset):
         target = self.get_target(example)
 
         if 'ctxs' in example and self.n_context is not None:
-            f = self.title_prefix + " {} " + self.passage_prefix + " {}"
-            contexts = example['ctxs'][:self.n_context]
-            passages = [f.format(c['title'], c['text']) for c in contexts]
+            if "title" in contexts[0]:
+                f = self.title_prefix + " {} " + self.passage_prefix + " {}"
+                contexts = example['ctxs'][:self.n_context]
+                passages = [f.format(c['title'], c['text']) for c in contexts]
+            else:
+                f = self.passage_prefix + " {}"
+                contexts = example['ctxs'][:self.n_context]
+                passages = [f.format(c['text']) for c in contexts]
             scores = [float(c['score']) for c in contexts]
             scores = torch.tensor(scores)
             # TODO(egrave): do we want to keep this?
@@ -134,9 +139,9 @@ def load_data(data_path=None, global_rank=-1, world_size=-1):
             example = json.loads(example)
         if not 'id' in example:
             example['id'] = k
-        for c in example['ctxs']:
+        for ci, c in enumerate(example['ctxs']):
             if not 'score' in c:
-                c['score'] = 1.0 / (k + 1)
+                c['score'] = 1.0 / (ci + 1)
         examples.append(example)
     ## egrave: is this needed?
     if data_path is not None and data_path.endswith('.jsonl'):
