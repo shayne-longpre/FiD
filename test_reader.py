@@ -3,16 +3,15 @@
 # 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+import json
 import sys, os
 import torch
 import transformers
 import numpy as np
-import pandas as pd
 from pathlib import Path
 import torch.distributed as dist
 from torch.utils.data import DataLoader, SequentialSampler
-
+from tqdm import tqdm
 
 import src.slurm
 import src.util
@@ -27,7 +26,6 @@ def softmax(x):
     return f_x
 
 def evaluate(model, dataset, dataloader, tokenizer, opt):
-    loss, curr_loss = 0.0, 0.0
     model.eval()
     if hasattr(model, "module"):
         model = model.module
@@ -41,7 +39,7 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
         write_path = Path(opt.checkpoint_dir) / opt.name / 'test_results'
         fw = open(write_path / ('%d.txt'%opt.global_rank), 'a')
     with torch.no_grad():
-        for i, batch in enumerate(dataloader):
+        for i, batch in tqdm(enumerate(dataloader)):
             (idx, _, _, context_ids, context_mask) = batch
 
             if opt.write_crossattention_scores:
@@ -57,7 +55,6 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
             )
             gen_sequence = outputs["sequences"]
             seq_score = outputs["scores"]
-
             if opt.write_crossattention_scores:
                 # TODO: Swap these lines for commented out `.cuda()` lines.
                 crossattention_scores = model.get_crossattention_scores(context_mask)
@@ -87,7 +84,6 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
                 else:
                     log += f' | average = {np.mean(exactmatch):.3f}'
                 logger.warning(log)
-
     logger.warning(f'Process rank:{opt.global_rank}, total {total} | average = {np.mean(exactmatch):.3f}')
     if opt.is_distributed:
         torch.distributed.barrier()
@@ -96,7 +92,7 @@ def evaluate(model, dataset, dataloader, tokenizer, opt):
     return {
         "answers": answers,
         "seq_scores": seq_scores,
-        "score": score, 
+        "score": score,
         "total": total,
         "exact_matches": exactmatch,
     }
@@ -115,20 +111,19 @@ def write_outputs_json(
     """
     assert len(eval_dataset) == len(answers) == len(seq_scores)
     outputs = []
-    for i, eval_datum in enumerate(eval_dataset):
+    for i in range(len(eval_dataset)):
         outputs.append({
-            "index": eval_datum["index"],
-            "question": eval_datum["question"].replace("question: ", ""),
-            # "target": eval_datum["target"],
+            "question": eval_dataset.data[i]["question"],
+            "ctxs": eval_dataset.data[i]["ctxs"][:eval_dataset.n_context],
+            "answers": eval_dataset.data[i]["answers"],
             "predicted_answer": {
-                # "em": int(exact_matches[i]),
                 "text": answers[i],
-                "seq_scores": [np.max(softmax(ssv.numpy()[0])) for ssv in seq_scores[i]],
+                "seq_scores": [float(np.max(softmax(ssv.cpu().numpy()[0]))) for ssv in
+                               seq_scores[i]],
             },
         })
-    # write to JSONL
-    os.makedirs(os.path.dirname(outpath), exist_ok=True)
-    pd.DataFrame(outputs).to_json(outpath, orient="records", lines=True, compression="infer")
+    with open(outpath, "w", encoding="utf-8") as f:
+        f.write(json.dumps(outputs, indent=4, ensure_ascii=False))
 
 
 if __name__ == "__main__":
@@ -172,10 +167,9 @@ if __name__ == "__main__":
         eval_dataset, 
         sampler=eval_sampler, 
         batch_size=opt.per_gpu_batch_size,
-        num_workers=20, 
+        num_workers=0,
         collate_fn=collator_function
     )
-    
     model_class = src.model.FiDT5
     model = model_class.from_pretrained(opt.model_path)
     model = model.to(opt.device)
@@ -190,17 +184,16 @@ if __name__ == "__main__":
 
     # Save our scores out here:
     write_outputs_json(
-        eval_dataset, 
-        answers, 
-        seq_scores, 
-        ems, 
-        os.path.join(opt.checkpoint_dir, opt.name, "saved_scores.jsonl"),
+        eval_dataset,
+        answers,
+        seq_scores,
+        ems,
+        os.path.join(opt.checkpoint_dir, opt.name, "predictions.json"),
     )
 
     if opt.write_results and opt.is_main:
         glob_path = Path(opt.checkpoint_dir) / opt.name / 'test_results'
         write_path = Path(opt.checkpoint_dir) / opt.name / 'final_output.txt'
-        src.util.write_output(glob_path, write_path) 
+        src.util.write_output(glob_path, write_path)
     if opt.write_crossattention_scores:
         src.util.save_distributed_dataset(eval_dataset.data, opt)
-

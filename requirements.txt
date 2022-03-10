@@ -4,3 +4,4 @@ faiss-cpu
 transformers==4.2.0
 tensorboard
 pandas
+sentencepiece

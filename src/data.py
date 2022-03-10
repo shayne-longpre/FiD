@@ -41,6 +41,7 @@ class Dataset(torch.utils.data.Dataset):
         target = self.get_target(example)
 
         if 'ctxs' in example and self.n_context is not None:
+            contexts = example['ctxs'][:self.n_context]
             if "title" in contexts[0]:
                 f = self.title_prefix + " {} " + self.passage_prefix + " {}"
                 contexts = example['ctxs'][:self.n_context]
