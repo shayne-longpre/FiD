@@ -8,6 +8,7 @@ import time
 import sys
 import torch
 import transformers
+import tqdm
 import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, SequentialSampler
@@ -36,7 +37,7 @@ def train(model, optimizer, scheduler, step, train_dataset, eval_dataset, opt, c
         sampler=train_sampler,
         batch_size=opt.per_gpu_batch_size,
         drop_last=True,
-        num_workers=10,
+        num_workers=0,
         collate_fn=collator
     )
 
@@ -45,7 +46,7 @@ def train(model, optimizer, scheduler, step, train_dataset, eval_dataset, opt, c
     model.train()
     while step < opt.total_steps:
         epoch += 1
-        for i, batch in enumerate(train_dataloader):
+        for i, batch in tqdm.tqdm(enumerate(train_dataloader), desc="Training..."):
             step += 1
             (idx, labels, _, context_ids, context_mask) = batch
 
@@ -94,9 +95,9 @@ def evaluate(model, dataset, tokenizer, collator, opt):
     sampler = SequentialSampler(dataset)
     dataloader = DataLoader(dataset,
         sampler=sampler,
-        batch_size=opt.per_gpu_batch_size,
+        batch_size=opt.per_gpu_batch_size*5,
         drop_last=False,
-        num_workers=10,
+        num_workers=0,
         collate_fn=collator
     )
     model.eval()
@@ -104,7 +105,7 @@ def evaluate(model, dataset, tokenizer, collator, opt):
     exactmatch = []
     model = model.module if hasattr(model, "module") else model
     with torch.no_grad():
-        for i, batch in enumerate(dataloader):
+        for i, batch in tqdm.tqdm(enumerate(dataloader), desc="Evaluating..."):
             (idx, _, _, context_ids, context_mask) = batch
 
             outputs = model.generate(
@@ -113,13 +114,14 @@ def evaluate(model, dataset, tokenizer, collator, opt):
                 max_length=50
             )
 
-            for k, o in enumerate(outputs):
-                ans = tokenizer.decode(o, skip_special_tokens=True)
+            for k in range(idx.size(0)):
+                ans_ids = outputs.sequences[k]
+                ans = tokenizer.decode(ans_ids, skip_special_tokens=True)
                 gold = dataset.get_example(idx[k])['answers']
                 score = src.evaluation.ems(ans, gold)
                 total += 1
                 exactmatch.append(score)
-
+    logger.info(f"evaluated {total} instances.")
     exactmatch, total = src.util.weighted_average(np.mean(exactmatch), total, opt)
     return exactmatch
 
