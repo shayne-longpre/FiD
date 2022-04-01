@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+import math
 import torch
 import random
 import json
@@ -125,7 +125,7 @@ class Collator(object):
 
         return (index, target_ids, target_mask, passage_ids, passage_masks)
 
-def load_data(data_path=None, global_rank=-1, world_size=-1):
+def load_data(data_path=None, global_rank=-1, world_size=-1, percent_of_data=100):
     assert data_path
     if data_path.endswith('.jsonl'):
         data = open(data_path, 'r')
@@ -144,6 +144,12 @@ def load_data(data_path=None, global_rank=-1, world_size=-1):
             if not 'score' in c:
                 c['score'] = 1.0 / (ci + 1)
         examples.append(example)
+
+    # Get the first `percent_of_data` from all examples. This is useful if we've sorted
+    # by retriever entropy and want to train on lowest entropy instances.
+    num_instances = math.ceil(len(examples)*percent_of_data/100)
+    examples = examples[:num_instances]
+
     ## egrave: is this needed?
     if data_path is not None and data_path.endswith('.jsonl'):
         data.close()

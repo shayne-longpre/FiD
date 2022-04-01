@@ -3,3 +3,5 @@ env/
 open_domain_data/
 pretrained_models/
 __pycache__/
+.ipynb_checkpoints/
+notebooks/

@@ -130,7 +130,6 @@ if __name__ == "__main__":
     options.add_reader_options()
     options.add_optim_options()
     opt = options.parse()
-    #opt = options.get_options(use_reader=True, use_optim=True)
 
     torch.manual_seed(opt.seed)
     src.slurm.init_distributed_mode(opt)
@@ -141,9 +140,6 @@ if __name__ == "__main__":
     if opt.is_distributed:
         torch.distributed.barrier()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
-    #if not checkpoint_exists and opt.is_main:
-    #    options.print_options(opt)
-    #checkpoint_path, checkpoint_exists = util.get_checkpoint_path(opt)
 
     logger = src.util.init_logger(
         opt.is_main,
@@ -158,14 +154,17 @@ if __name__ == "__main__":
     tokenizer = transformers.T5Tokenizer.from_pretrained(model_name)
     collator = src.data.Collator(opt.text_maxlength, tokenizer, answer_maxlength=opt.answer_maxlength)
 
-    # use golbal rank and world size to split the eval set on multiple gpus
+    # use global rank and world size to split the eval set on multiple gpus
     train_examples = src.data.load_data(
-        opt.train_data, 
-        global_rank=opt.global_rank, 
+        opt.train_data,
+        global_rank=opt.global_rank,
         world_size=opt.world_size,
+        percent_of_data=opt.percent_of_data
     )
+    logger.info(f"Number of training instances {len(train_examples)}")
+
     train_dataset = src.data.Dataset(train_examples, opt.n_context)
-    # use golbal rank and world size to split the eval set on multiple gpus
+    # use global rank and world size to split the eval set on multiple gpus
     eval_examples = src.data.load_data(
         opt.eval_data,
         global_rank=opt.global_rank,
